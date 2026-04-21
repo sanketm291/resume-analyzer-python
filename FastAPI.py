@@ -1,9 +1,28 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 import PyPDF2
-import os
+import tempfile
 
 app = FastAPI()
 
+# Enable CORS (important for frontend/Java calls)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Optional root endpoint
+@app.get("/")
+def home():
+    return {"message": "Resume Analyzer API is running"}
+
+@app.post("/upload-resume")
+async def upload_resume(...):
+
+# Skills DB
 SKILLS_DB = [
     "python", "java", "sql", "spring boot",
     "machine learning", "docker", "aws", "react"
@@ -12,45 +31,29 @@ SKILLS_DB = [
 def extract_text_from_pdf(file_path):
     reader = PyPDF2.PdfReader(file_path)
     text = ""
-
     for page in reader.pages:
-        content = page.extract_text()
-        if content:
-            text += content
-
+        text += page.extract_text() or ""
     return text.lower()
 
+# Main API
 @app.post("/upload-resume")
-async def upload_resume(file: UploadFile = File(...), jd: str = Form(...)):
-    try:
-        temp_file_path = "temp.pdf"
+async def upload_resume(file: UploadFile = File(...)):
 
-        with open(temp_file_path, "wb") as f:
-            f.write(await file.read())
+    # Save uploaded file temporarily
+    with tempfile.NamedTemporaryFile(delete=False) as temp:
+        content = await file.read()
+        temp.write(content)
+        temp_path = temp.name
 
-        resume_text = extract_text_from_pdf(temp_file_path)
-        jd_text = jd.lower()
+    # Extract text
+    text = extract_text_from_pdf(temp_path)
 
-        resume_skills = [skill for skill in SKILLS_DB if skill in resume_text]
-        jd_skills = [skill for skill in SKILLS_DB if skill in jd_text]
+    # Match skills
+    extracted_skills = []
+    for skill in SKILLS_DB:
+        if skill in text:
+            extracted_skills.append(skill)
 
-        matched_skills = list(set(resume_skills) & set(jd_skills))
-        missing_skills = list(set(jd_skills) - set(resume_skills))
-
-        match_percentage = 0
-        if jd_skills:
-            match_percentage = int((len(matched_skills) / len(jd_skills)) * 100)
-
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-        return {
-            "resume_skills": resume_skills,
-            "jd_skills": jd_skills,
-            "matched_skills": matched_skills,
-            "missing_skills": missing_skills,
-            "match_percentage": match_percentage
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
+    return {
+        "skills": list(set(extracted_skills))
+    }
