@@ -5,7 +5,7 @@ import tempfile
 
 app = FastAPI()
 
-# Enable CORS (important for frontend/Java calls)
+# Enable CORS (important for Java/frontend calls)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,20 +14,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Optional root endpoint
+# Root endpoint 
 @app.get("/")
 def home():
     return {"message": "Resume Analyzer API is running"}
 
-@app.post("/upload-resume")
-async def upload_resume(...):
-
-# Skills DB
+# Skills database
 SKILLS_DB = [
     "python", "java", "sql", "spring boot",
     "machine learning", "docker", "aws", "react"
 ]
 
+# Extract text from PDF
 def extract_text_from_pdf(file_path):
     reader = PyPDF2.PdfReader(file_path)
     text = ""
@@ -35,7 +33,7 @@ def extract_text_from_pdf(file_path):
         text += page.extract_text() or ""
     return text.lower()
 
-# Main API
+# Main API endpoint
 @app.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
 
@@ -45,7 +43,7 @@ async def upload_resume(file: UploadFile = File(...)):
         temp.write(content)
         temp_path = temp.name
 
-    # Extract text
+    # Extract text from PDF
     text = extract_text_from_pdf(temp_path)
 
     # Match skills
