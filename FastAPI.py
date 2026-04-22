@@ -1,11 +1,11 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import PyPDF2
 import tempfile
 
 app = FastAPI()
 
-# Enable CORS (important for Java/frontend calls)
+# ✅ Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,12 +14,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Root endpoint 
+# ✅ Root endpoint
 @app.get("/")
 def home():
     return {"message": "Resume Analyzer API is running"}
 
-# Skills database
+# Skills DB
 SKILLS_DB = [
     "python", "java", "sql", "spring boot",
     "machine learning", "docker", "aws", "react"
@@ -33,25 +33,49 @@ def extract_text_from_pdf(file_path):
         text += page.extract_text() or ""
     return text.lower()
 
-# Main API endpoint
+# ✅ UPDATED API (resume + job description)
 @app.post("/upload-resume")
-async def upload_resume(file: UploadFile = File(...)):
+async def upload_resume(
+    file: UploadFile = File(...),
+    job_description: str = Form(...)
+):
 
-    # Save uploaded file temporarily
+    # Save file temporarily
     with tempfile.NamedTemporaryFile(delete=False) as temp:
         content = await file.read()
         temp.write(content)
         temp_path = temp.name
 
-    # Extract text from PDF
-    text = extract_text_from_pdf(temp_path)
+    # Extract resume text
+    resume_text = extract_text_from_pdf(temp_path)
 
-    # Match skills
-    extracted_skills = []
+    # Lowercase JD
+    jd_text = job_description.lower()
+
+    # Extract skills from resume
+    resume_skills = []
     for skill in SKILLS_DB:
-        if skill in text:
-            extracted_skills.append(skill)
+        if skill in resume_text:
+            resume_skills.append(skill)
+
+    # Extract skills from JD
+    jd_skills = []
+    for skill in SKILLS_DB:
+        if skill in jd_text:
+            jd_skills.append(skill)
+
+    # Match calculation
+    matched = list(set(resume_skills) & set(jd_skills))
+    missing = list(set(jd_skills) - set(resume_skills))
+
+    match_percentage = 0
+    if len(jd_skills) > 0:
+        match_percentage = int((len(matched) / len(jd_skills)) * 100)
 
     return {
-        "skills": list(set(extracted_skills))
+        "resume_skills": list(set(resume_skills)),
+        "jd_skills": list(set(jd_skills)),
+        "matched_skills": matched,
+        "missing_skills": missing,
+        "match_percentage": match_percentage
     }
