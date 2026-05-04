@@ -3,18 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 import PyPDF2
 import tempfile
 import re
-import spacy
-
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+import os
+import requests
 
 app = FastAPI()
 
-# Load models
-nlp = spacy.load("en_core_web_sm")
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-# CORS
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,6 +16,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ---------------- PDF TEXT EXTRACTION ----------------
 def extract_text_from_pdf(file_path):
@@ -52,78 +48,55 @@ TECH_HINTS = {
 
 def extract_jd_skills(text):
     text = text.lower()
+    words = re.findall(r'\b[a-zA-Z0-9+#.]+\b', text)
 
-    # 🔹 Context filtering
-    lines = text.split("\n")
-    context_keywords = [
-        "skills","technologies","tools",
-        "experience","stack","framework","proficient"
-    ]
+    skills = set()
 
-    relevant_lines = [
-        line for line in lines
-        if any(k in line for k in context_keywords)
-    ]
+    for word in words:
+        if word not in GENERIC_WORDS and len(word) > 2:
+            skills.add(word)
 
-    if not relevant_lines:
-        relevant_lines = lines
+    return list(skills)
 
-    text = " ".join(relevant_lines)
+# ---------------- OPENAI EMBEDDING ----------------
+def get_embedding(text):
+    url = "https://api.openai.com/v1/embeddings"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "text-embedding-3-small",
+        "input": text
+    }
 
-    # 🔹 NLP
-    doc = nlp(text)
+    response = requests.post(url, headers=headers, json=data)
+    return response.json()["data"][0]["embedding"]
 
-    tokens = []
-    for token in doc:
-        if token.pos_ in ["NOUN", "PROPN"]:
-            word = token.text.strip()
+# ---------------- COSINE SIMILARITY ----------------
+def cosine_similarity(vec1, vec2):
+    dot = sum(a*b for a, b in zip(vec1, vec2))
+    norm1 = sum(a*a for a in vec1) ** 0.5
+    norm2 = sum(b*b for b in vec2) ** 0.5
 
-            if (
-                word not in GENERIC_WORDS and
-                len(word) > 2 and
-                word.isalpha()
-            ):
-                tokens.append(word)
+    if norm1 == 0 or norm2 == 0:
+        return 0
 
-    # 🔹 Phrase building
-    skills = set(tokens)
+    return dot / (norm1 * norm2)
 
-    for i in range(len(tokens) - 1):
-        phrase = tokens[i] + " " + tokens[i + 1]
-        if len(phrase) < 25:
-            skills.add(phrase)
-
-    # 🔹 Validation
-    def is_valid(skill):
-        return (
-            any(char.isdigit() for char in skill) or
-            skill in TECH_HINTS or
-            len(skill) <= 15
-        )
-
-    final_skills = [s for s in skills if is_valid(s)]
-
-    return list(set(final_skills))
-
-# ---------------- MATCH WITH SCORE ----------------
+# ---------------- MATCH ----------------
 def hybrid_match_with_score(jd_skills, resume_text):
     results = []
 
-    resume_lines = [line.strip() for line in resume_text.split("\n") if line.strip()]
-    if not resume_lines:
-        resume_lines = [resume_text]
+    resume_embedding = get_embedding(resume_text)
 
-    resume_embeddings = model.encode(resume_lines)
-    jd_embeddings = model.encode(jd_skills)
+    for skill in jd_skills:
 
-    for i, skill in enumerate(jd_skills):
-
-        # keyword boost
         if skill in resume_text:
             score = 0.95
         else:
-            scores = cosine_similarity([jd_embeddings[i]], resume_embeddings)[0]
-            score = float(max(scores))
+            skill_embedding = get_embedding(skill)
+            score = cosine_similarity(skill_embedding, resume_embedding)
 
         results.append({
             "skill": skill,
@@ -150,6 +123,7 @@ async def upload_resume(
             temp_path = temp.name
 
         resume_text = extract_text_from_pdf(temp_path)
+
         jd_skills = extract_jd_skills(job_description or "")
         resume_skills = extract_jd_skills(resume_text or "")
 
