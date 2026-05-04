@@ -71,7 +71,13 @@ def get_embedding(text):
     }
 
     response = requests.post(url, headers=headers, json=data)
-    return response.json()["data"][0]["embedding"]
+    res = response.json()
+    print("DEBUG RESPONSE:", res)
+
+    if "data" not in res:
+        raise Exception(f"OpenAI Error: {res}")
+
+    return res["data"][0]["embedding"]
 
 # ---------------- COSINE SIMILARITY ----------------
 def cosine_similarity(vec1, vec2):
