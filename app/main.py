@@ -1,11 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+
 import PyPDF2
 import tempfile
 import re
-import os
-import requests
-import math
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 app = FastAPI()
 
@@ -18,17 +19,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- HUGGINGFACE CONFIG ----------------
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-
-HEADERS = {
-    "Authorization": f"Bearer {HF_TOKEN}"
-}
-
 # ---------------- PDF TEXT EXTRACTION ----------------
 def extract_text_from_pdf(file_path):
+
     try:
         reader = PyPDF2.PdfReader(file_path)
 
@@ -50,10 +43,22 @@ GENERIC_WORDS = {
     "india","bangalore","years","experience",
     "looking","strong","good","skills","skill",
     "using","develop","build","create","maintain",
-    "optimize","efficient","systems","services"
+    "optimize","efficient","systems","services",
+    "knowledge","understanding","ability","working"
 }
 
-def extract_jd_skills(text):
+TECH_SKILLS = {
+    "java","python","sql","mysql","postgresql",
+    "spring","springboot","hibernate",
+    "aws","docker","kubernetes","linux",
+    "javascript","react","angular","nodejs",
+    "html","css","git","rest","api",
+    "microservices","redis","mongodb",
+    "fastapi","flask","django","azure","gcp"
+}
+
+def extract_skills(text):
+
     text = text.lower()
 
     words = re.findall(r'\b[a-zA-Z0-9+#.]+\b', text)
@@ -61,109 +66,75 @@ def extract_jd_skills(text):
     skills = set()
 
     for word in words:
-        if word not in GENERIC_WORDS and len(word) > 2:
-            skills.add(word)
+
+        word = word.strip()
+
+        if (
+            word not in GENERIC_WORDS
+            and len(word) > 2
+        ):
+
+            if (
+                word in TECH_SKILLS
+                or any(char.isdigit() for char in word)
+            ):
+                skills.add(word)
 
     return list(skills)
 
-# ---------------- GET EMBEDDING ----------------
-def get_embedding(text):
+# ---------------- TF-IDF MATCHING ----------------
+def calculate_similarity(jd_text, resume_text):
 
-    payload = {
-        "inputs": text
-    }
+    documents = [jd_text, resume_text]
 
-    response = requests.post(
-        API_URL,
-        headers=HEADERS,
-        json=payload
+    vectorizer = TfidfVectorizer()
+
+    tfidf_matrix = vectorizer.fit_transform(documents)
+
+    similarity = cosine_similarity(
+        tfidf_matrix[0:1],
+        tfidf_matrix[1:2]
+    )[0][0]
+
+    return round(similarity * 100, 2)
+
+# ---------------- SKILL MATCHING ----------------
+def match_skills(jd_skills, resume_skills):
+
+    matched = []
+    missing = []
+
+    resume_skill_set = set(
+        skill.lower() for skill in resume_skills
     )
-
-    result = response.json()
-
-    print("HF RESPONSE:", result)
-
-    # Error handling
-    if isinstance(result, dict) and result.get("error"):
-        raise Exception(result["error"])
-
-    # Some HF models return nested arrays
-    if isinstance(result[0], list):
-        embedding = result[0]
-    else:
-        embedding = result
-
-    return embedding
-
-# ---------------- COSINE SIMILARITY ----------------
-def cosine_similarity(vec1, vec2):
-
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-
-    magnitude1 = math.sqrt(sum(a * a for a in vec1))
-    magnitude2 = math.sqrt(sum(b * b for b in vec2))
-
-    if magnitude1 == 0 or magnitude2 == 0:
-        return 0
-
-    return dot_product / (magnitude1 * magnitude2)
-
-# ---------------- MATCHING ----------------
-def hybrid_match_with_score(jd_skills, resume_text):
-
-    results = []
-
-    resume_embedding = get_embedding(resume_text)
 
     for skill in jd_skills:
 
-        try:
+        if skill.lower() in resume_skill_set:
 
-            # Keyword exact match boost
-            if skill in resume_text:
-                score = 0.95
-
-            else:
-                skill_embedding = get_embedding(skill)
-
-                score = cosine_similarity(
-                    skill_embedding,
-                    resume_embedding
-                )
-
-            results.append({
+            matched.append({
                 "skill": skill,
-                "score": round(score * 100, 2)
+                "score": 95
             })
 
-        except Exception as e:
-            print("MATCH ERROR:", e)
+        else:
 
-    results = sorted(
-        results,
-        key=lambda x: x["score"],
-        reverse=True
-    )
+            missing.append({
+                "skill": skill,
+                "score": 30
+            })
 
-    matched = [
-        r for r in results
-        if r["score"] >= 60
-    ]
+    return matched, missing
 
-    missing = [
-        r for r in results
-        if r["score"] < 60
-    ]
-
-    return matched, missing, results
-
-# ---------------- API ----------------
+# ---------------- HOME ----------------
 @app.get("/")
 def home():
+
     return {
         "message": "Resume Analyzer API Running"
     }
 
+# ---------------- MAIN API ----------------
 @app.post("/upload-resume")
 async def upload_resume(
     file: UploadFile = File(...),
@@ -172,6 +143,7 @@ async def upload_resume(
 
     try:
 
+        # Save uploaded PDF temporarily
         with tempfile.NamedTemporaryFile(delete=False) as temp:
 
             temp.write(await file.read())
@@ -184,28 +156,32 @@ async def upload_resume(
         resume_text = extract_text_from_pdf(temp_path)
 
         # Extract skills
-        jd_skills = extract_jd_skills(job_description or "")
-        resume_skills = extract_jd_skills(resume_text or "")
+        jd_skills = extract_skills(job_description or "")
+        resume_skills = extract_skills(resume_text or "")
 
-        # Match
-        matched, missing, all_results = hybrid_match_with_score(
-            jd_skills,
+        # Calculate similarity
+        match_percentage = calculate_similarity(
+            job_description,
             resume_text
         )
 
-        # Match percentage
-        match_percentage = (
-            int((len(matched) / len(jd_skills)) * 100)
-            if jd_skills else 0
+        # Match skills
+        matched_skills, missing_skills = match_skills(
+            jd_skills,
+            resume_skills
         )
 
         return {
+
             "match_percentage": match_percentage,
+
             "resume_skills": resume_skills,
+
             "jd_skills": jd_skills,
-            "matched_skills": matched,
-            "missing_skills": missing,
-            "all_skills": all_results
+
+            "matched_skills": matched_skills,
+
+            "missing_skills": missing_skills
         }
 
     except Exception as e:
