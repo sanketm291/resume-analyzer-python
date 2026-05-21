@@ -5,6 +5,7 @@ import tempfile
 import re
 import os
 import requests
+import math
 
 app = FastAPI()
 
@@ -17,17 +18,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ---------------- HUGGINGFACE CONFIG ----------------
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+
+HEADERS = {
+    "Authorization": f"Bearer {HF_TOKEN}"
+}
 
 # ---------------- PDF TEXT EXTRACTION ----------------
 def extract_text_from_pdf(file_path):
     try:
         reader = PyPDF2.PdfReader(file_path)
+
         text = ""
+
         for page in reader.pages:
             text += page.extract_text() or ""
+
         return text.lower()
-    except:
+
+    except Exception as e:
+        print("PDF ERROR:", e)
         return ""
 
 # ---------------- SKILL EXTRACTION ----------------
@@ -40,14 +53,9 @@ GENERIC_WORDS = {
     "optimize","efficient","systems","services"
 }
 
-TECH_HINTS = {
-    "java","python","sql","aws","azure","gcp",
-    "docker","kubernetes","spring","react","angular",
-    "node","api","rest","microservices","linux"
-}
-
 def extract_jd_skills(text):
     text = text.lower()
+
     words = re.findall(r'\b[a-zA-Z0-9+#.]+\b', text)
 
     skills = set()
@@ -58,84 +66,138 @@ def extract_jd_skills(text):
 
     return list(skills)
 
-# ---------------- OPENAI EMBEDDING ----------------
+# ---------------- GET EMBEDDING ----------------
 def get_embedding(text):
-    url = "https://api.openai.com/v1/embeddings"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "text-embedding-3-small",
-        "input": text
+
+    payload = {
+        "inputs": text
     }
 
-    response = requests.post(url, headers=headers, json=data)
-    res = response.json()
-    print("DEBUG RESPONSE:", res)
+    response = requests.post(
+        API_URL,
+        headers=HEADERS,
+        json=payload
+    )
 
-    if "data" not in res:
-        raise Exception(f"OpenAI Error: {res}")
+    result = response.json()
 
-    return res["data"][0]["embedding"]
+    print("HF RESPONSE:", result)
+
+    # Error handling
+    if isinstance(result, dict) and result.get("error"):
+        raise Exception(result["error"])
+
+    # Some HF models return nested arrays
+    if isinstance(result[0], list):
+        embedding = result[0]
+    else:
+        embedding = result
+
+    return embedding
 
 # ---------------- COSINE SIMILARITY ----------------
 def cosine_similarity(vec1, vec2):
-    dot = sum(a*b for a, b in zip(vec1, vec2))
-    norm1 = sum(a*a for a in vec1) ** 0.5
-    norm2 = sum(b*b for b in vec2) ** 0.5
 
-    if norm1 == 0 or norm2 == 0:
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+
+    magnitude1 = math.sqrt(sum(a * a for a in vec1))
+    magnitude2 = math.sqrt(sum(b * b for b in vec2))
+
+    if magnitude1 == 0 or magnitude2 == 0:
         return 0
 
-    return dot / (norm1 * norm2)
+    return dot_product / (magnitude1 * magnitude2)
 
-# ---------------- MATCH ----------------
+# ---------------- MATCHING ----------------
 def hybrid_match_with_score(jd_skills, resume_text):
+
     results = []
 
     resume_embedding = get_embedding(resume_text)
 
     for skill in jd_skills:
 
-        if skill in resume_text:
-            score = 0.95
-        else:
-            skill_embedding = get_embedding(skill)
-            score = cosine_similarity(skill_embedding, resume_embedding)
+        try:
 
-        results.append({
-            "skill": skill,
-            "score": round(score * 100, 2)
-        })
+            # Keyword exact match boost
+            if skill in resume_text:
+                score = 0.95
 
-    results = sorted(results, key=lambda x: x["score"], reverse=True)
+            else:
+                skill_embedding = get_embedding(skill)
 
-    matched = [r for r in results if r["score"] >= 60]
-    missing = [r for r in results if r["score"] < 60]
+                score = cosine_similarity(
+                    skill_embedding,
+                    resume_embedding
+                )
+
+            results.append({
+                "skill": skill,
+                "score": round(score * 100, 2)
+            })
+
+        except Exception as e:
+            print("MATCH ERROR:", e)
+
+    results = sorted(
+        results,
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    matched = [
+        r for r in results
+        if r["score"] >= 60
+    ]
+
+    missing = [
+        r for r in results
+        if r["score"] < 60
+    ]
 
     return matched, missing, results
 
 # ---------------- API ----------------
+@app.get("/")
+def home():
+    return {
+        "message": "Resume Analyzer API Running"
+    }
+
 @app.post("/upload-resume")
 async def upload_resume(
     file: UploadFile = File(...),
     job_description: str = Form(...)
 ):
+
     try:
+
         with tempfile.NamedTemporaryFile(delete=False) as temp:
+
             temp.write(await file.read())
+
             temp.flush()
+
             temp_path = temp.name
 
+        # Extract resume text
         resume_text = extract_text_from_pdf(temp_path)
 
+        # Extract skills
         jd_skills = extract_jd_skills(job_description or "")
         resume_skills = extract_jd_skills(resume_text or "")
 
-        matched, missing, all_results = hybrid_match_with_score(jd_skills, resume_text)
+        # Match
+        matched, missing, all_results = hybrid_match_with_score(
+            jd_skills,
+            resume_text
+        )
 
-        match_percentage = int((len(matched) / len(jd_skills)) * 100) if jd_skills else 0
+        # Match percentage
+        match_percentage = (
+            int((len(matched) / len(jd_skills)) * 100)
+            if jd_skills else 0
+        )
 
         return {
             "match_percentage": match_percentage,
@@ -147,4 +209,9 @@ async def upload_resume(
         }
 
     except Exception as e:
-        return {"error": str(e)}
+
+        print("MAIN ERROR:", e)
+
+        return {
+            "error": str(e)
+        }
